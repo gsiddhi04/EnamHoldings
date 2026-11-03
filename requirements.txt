@@ -1,0 +1,10 @@
+# Developed and tested on Python 3.9; the Docker image uses 3.11 (not built in my environment, see README). Minimums are the versions this was built and checked against.
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+requests>=2.31
+yfinance>=0.2.50        # end-of-day prices (NSE tickers use the .NS suffix)
+pandas>=2.0
+pypdf>=4.0              # filing + transcript text extraction
+beautifulsoup4>=4.12    # screener.in tables
+anthropic>=0.40         # only used if you choose ANTHROPIC_API_KEY instead of Gemini

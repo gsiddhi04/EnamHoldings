@@ -1,0 +1,22 @@
+# secrets
+.env
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# runtime data: databases and the PDF / text caches are rebuilt by the refresh.
+# data/seed/finn.db is the one committed snapshot, so a fresh deploy is never empty.
+data/*
+!data/seed/
+data/seed/*
+!data/seed/finn.db
+
+# frontend
+frontend/node_modules/
+frontend/dist/
+
+# the assignment PDFs and OS noise
+/*.pdf
+.DS_Store
