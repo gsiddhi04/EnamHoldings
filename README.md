@@ -23,7 +23,8 @@ brief is the product's point of view: *filtering*, not aggregation. Routine pape
 |---|---|
 | **Brief** | A headline written from the data ("Six things matter today."), a 24h / 3d / 7d window, a strip of the biggest movers, then **Above the fold** (results cards with a Revenue / EBITDA / PBT / PAT table with QoQ and YoY; management cards that show the people), **Worth a glance** one-liners, and a paper-fold crease hiding the routine filings. |
 | **Filing sheet** | Tap any card: full detail, why it was ranked, the filing PDF, and **Ask FINN** with suggested questions. |
-| **Alerts** | Steppers for the price move (±X%) and volume multiple (N× the 20-day average), toggles for the filing types you follow, then what has triggered. Changing a limit re-derives the alerts immediately. |
+| **Alerts** | Steppers for the price move (±X%) and volume multiple (N× the 20-day average), toggles for the filing types you follow, then what has triggered. Changing a limit re-derives the alerts immediately. Limits and read-state are **per visitor**, and a **Notify me on this device** switch sends a real lock-screen notification when a refresh finds something new. |
+| **Business** (inside Research) | What the company does and its revenue mix, read from the latest annual report: segments, shares computed from the printed segment note, with the page numbers and a link to the PDF. |
 | **Holdings** | The 18 stocks with sparklines, last close and move; tap for a stock page. |
 | **Research** | Any NSE symbol. Sticky section tabs: **Promised vs delivered**, numbers (with charts), cash, bull & bear, Ask FINN. |
 
@@ -63,6 +64,9 @@ The brief asks for cheap models on bulk work and a stronger one only where reaso
 | Management changes (people, role, effective date, bio from the annexure) | Whole filing if short, else the pages that mention appointments | cheap |
 | One-line summaries (≤18 words) | 20 filings per call | cheap |
 | Research numbers, CAGR, margins, debt/equity, working capital, cash conversion, observations | scraped from screener.in and computed in Python | none |
+| Business snapshot | Python finds the business-description and segment-note pages in the annual report (a 360-page report scans in ~20s); the model reads them; Python turns printed segment revenues into a mix and **drops any number not found in the page text** or any mix that is >12% off reported revenue | cheap |
+| Credit-rating direction | The model reads the rating letter (agency, action, from/to, outlook); a Python table then sets the priority (downgrade 75, upgrade 55, reaffirm 20, reaffirm with negative outlook 55) | cheap |
+| Public bio of an incoming director | Wikipedia's keyless API, accepted only if the page title is that person *and* the intro mentions the company | none |
 | Promises: extract from concall transcripts | A keyword filter cuts a ~46k-character transcript to ~2k of candidate paragraphs first | cheap |
 | Promises: judge against reported numbers | One call over all promises and the numbers | **strong** |
 | Bull / bear | One call over the computed facts | **strong** |
@@ -73,7 +77,7 @@ Tiers map onto Gemini by default (`gemini-3.5-flash-lite` cheap with thinking of
 
 Caching: every call is keyed on a hash of model + prompt in `llm_cache`, so re-runs cost nothing; research sections are cached
 for 7 days; PDFs and their extracted text are cached on disk. For the whole demo universe (114 filings, a handful of research
-runs) the cache holds **59 calls, about 127k input and 15k output tokens**, which fits a free tier.
+runs) the cache holds **71 calls, about 156k input and 18k output tokens**, which fits a free tier.
 
 ## Judgment calls
 
@@ -100,6 +104,14 @@ runs) the cache holds **59 calls, about 127k input and 15k output tokens**, whic
 10. **Honest about time.** The intraday bar is flagged "live" before 15:45 IST, and volume multiples on it are partial.
     Loading states say what is happening ("Reading 5 earnings-call transcripts…") with an elapsed counter.
 
+11. **A public link must be safe to share.** Alert limits and read-state belong to each browser (a random id), not to everyone who
+    has the URL. Model-backed endpoints are rate-limited per client and capped per day (`FINN_DAILY_LLM_CAP`), and anything already
+    generated stays instantly available when the cap is hit.
+12. **Direction matters for ratings.** A rating filing is routine or critical depending on up/down, which only the letter says, so
+    it is read and scored (downgrade 75, upgrade 55, reaffirm 20) instead of getting a flat priority.
+13. **Bios: a source or nothing.** The filing's own annexure first, then a verified Wikipedia page, otherwise "No profile in the
+    filing and no public page found". No model recollections of people.
+
 ## Run it
 
 Requires Python 3.9+ (developed and tested on 3.9), Node 18+ and an LLM key (a free Gemini key is fine).
@@ -112,6 +124,8 @@ cp .env.example .env        # paste your GEMINI_API_KEY after the =
 Open `http://localhost:8000`, or the `http://<computer-ip>:8000` it prints on a phone on the same wifi.
 `./run.sh --no-refresh` restarts quickly; `PORT=9000 ./run.sh` changes the port. Without a key everything that doesn't need a
 model still works (prices, filings, rule-based ranking, alerts, the research numbers and charts).
+
+Tests (offline, no key needed, ~1 second): `pip install -r requirements-dev.txt && pytest`
 
 Pieces on their own:
 
@@ -141,6 +155,13 @@ For persistence, attach a disk and set `FINN_DB=/var/data/finn.db`.
 Caveat: NSE sometimes blocks cloud IP ranges. If the hosted refresh logs show NSE failures, the app keeps serving the seed
 snapshot; to demo live data, run `./run.sh` on a laptop and expose it with a tunnel (`cloudflared tunnel --url http://localhost:8000`).
 
+### Notifications (Web Push)
+
+Works on Android Chrome and on an iPhone once FINN is added to the Home Screen (Share → Add to Home Screen). Keys are generated
+locally into `data/vapid.json`. **On a host whose disk is wiped on restart, generate one set and set it as an environment variable,
+or every restart silently invalidates subscriptions:** run `python -m backend.push` and paste the `FINN_VAPID_PRIVATE=…` line into
+the host's environment. Sending is exercised by tests with a fake sender; delivery to a physical device is untested.
+
 ## API
 
 | Endpoint | |
@@ -151,19 +172,23 @@ snapshot; to demo live data, run `./run.sh` on a laptop and expose it with a tun
 | `GET /api/holdings`, `GET /api/stock/{symbol}`, `GET /api/announcement/{id}` | data for the screens |
 | `GET /api/research/{symbol}` | computed sections + plain-English observations (no LLM) |
 | `GET /api/research/{symbol}/promises` | promised vs delivered |
+| `GET /api/research/{symbol}/business` | business description + revenue mix from the annual report |
 | `GET /api/research/{symbol}/bullbear` | 3 bull + 3 bear, each tied to a computed number |
+| `GET /api/push/key`, `POST /api/push/subscribe`, `POST /api/push/unsubscribe` | Web Push |
+| `GET /api/status` | is the model reachable, how fresh is the data, how much daily AI quota is left |
 | `POST /api/ask` `{question, symbol?, ann_id?}` | grounded answer, ≤90 words |
 
 ## What I left out, and what's next
 
-- **Business snapshot** (what the company does, segments, revenue mix) and **annual-report grounding**: the pull side currently uses
-  screener.in's tables and concall transcripts, not the annual report PDFs.
-- **Management bios from outside the filing** (the brief's LinkedIn example). Bios come only from the filing's own annexure,
-  and are blank when it has none.
-- **Credit-rating direction.** A downgrade vs an upgrade is only in the rating letter's PDF, so rating filings get a flat priority for now.
+- **Segment mix is best-effort.** It is shown only when the report's segment note was found and its total is within 12% of reported
+  revenue (ITC's, which includes inter-segment sales, is correctly suppressed). Banks usually get a description but no mix.
+- **Bios cover notable people only.** Wikipedia has a page for a chairman or CEO, not for most independent directors. LinkedIn is not
+  scraped, and Google Search grounding was not available on the free Gemini tier I built on.
 - **Concall coverage depends on screener.in.** Some companies (ITC, Trent) list no transcript links, and some company-hosted
   links block scripts. The app says so instead of guessing.
 - **Scanned PDFs** are not OCR'd; a scan with no text layer is marked unavailable.
-- **Real-time push** (web push / notifications): alerts are evaluated on refresh, not delivered to the lock screen.
+- **Push delivery is untested on a physical device.** The subscription flow and the sender's "only what's new, never twice, keep
+  pending if undelivered" logic are tested; the final hop through the browser vendor's push service is not.
 - **Promise judging is the weakest link.** It is only as good as the quote's context; a perfect score means "no contradiction
   found", not proof. Next step would be giving the judge the surrounding paragraph and a per-company metric glossary.
+- **Single process, SQLite.** Right for a prototype; multiple workers would need a shared rate limiter and a real database.

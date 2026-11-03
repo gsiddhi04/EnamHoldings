@@ -12,13 +12,13 @@ import time
 
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import alerts, config, db, research
+from . import alerts, config, db, limits, llm, push, research
 from .announcements import NSEClient, store_announcements
 from .prices import fetch_prices, store_prices
 
@@ -55,13 +55,36 @@ if os.environ.get("FINN_AUTO_REFRESH_HOURS"):
     threading.Thread(target=_auto_refresh, args=(float(os.environ["FINN_AUTO_REFRESH_HOURS"]),), daemon=True).start()
 
 
+VISITOR_RE = re.compile(r"^[A-Za-z0-9-]{8,64}$")
+
+
+def _visitor(raw: Optional[str]) -> str:
+    """Each browser sends its own random id, so thresholds and read-state are per person, not shared by everyone with the link."""
+    return raw if raw and VISITOR_RE.match(raw) else "anonymous"
+
+
+@app.get("/api/status")
+def status():
+    """What a deployer needs to know: is the model reachable, how fresh is the data, how much quota is left."""
+    with db.session() as conn:
+        return {
+            "llm": {"provider": llm.provider(), "cheap": llm.resolve(None) if llm.available() else None,
+                    "strong": llm.resolve(config.STRONG_MODEL) if llm.available() else None},
+            "data": {"latest_filing_fetch": conn.execute("SELECT MAX(fetched_at) FROM announcements").fetchone()[0],
+                     "latest_price_date": conn.execute("SELECT MAX(date) FROM prices").fetchone()[0],
+                     "last_refresh": db.get_setting(conn, "last_refresh_at"),
+                     "auto_refresh_hours": os.environ.get("FINN_AUTO_REFRESH_HOURS")},
+            "limits": limits.usage(),
+        }
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True}
 
 
 @app.get("/api/stock/{symbol}")
-def stock(symbol: str, ann_limit: int = Query(20, le=100), price_days: int = Query(30, le=365)):
+def stock(symbol: str, request: Request, ann_limit: int = Query(20, le=100), price_days: int = Query(30, le=365)):
     """Latest snapshot for any NSE symbol. Unknown symbols are fetched live and stored,
     so the engine is not tied to the demo universe."""
     symbol = symbol.upper()
@@ -71,6 +94,7 @@ def stock(symbol: str, ann_limit: int = Query(20, le=100), price_days: int = Que
     with db.session() as conn:
         have = conn.execute("SELECT COUNT(*) FROM prices WHERE symbol=?", (symbol,)).fetchone()[0]
         if not have:  # not in our DB yet: pull on demand
+            limits.check(request, "newsymbol", 20, 3600, "new companies")
             bars = fetch_prices([symbol], 35).get(symbol, [])
             if not bars:
                 raise HTTPException(404, f"No price data found for NSE:{symbol}")
@@ -232,24 +256,66 @@ def digest(hours: int = Query(24, ge=1, le=720), movers: int = Query(5, ge=1, le
 # ---------------------------------------------------------------- alerts ----------------------------------
 
 @app.get("/api/alerts")
-def get_alerts(unseen_only: bool = False, limit: int = Query(50, ge=1, le=500)):
+def get_alerts(unseen_only: bool = False, limit: int = Query(80, ge=1, le=500), x_visitor: Optional[str] = Header(None)):
+    v = _visitor(x_visitor)
     with db.session() as conn:
-        rows = _rows(conn.execute(
-            f"""SELECT al.id, al.symbol, s.name, al.kind, al.ref_id, al.title, al.detail, al.event_at, al.seen, an.summary
-                FROM alerts al LEFT JOIN stocks s ON s.symbol=al.symbol
-                LEFT JOIN announcements an ON al.kind='announcement' AND an.id=al.ref_id
-                {"WHERE al.seen=0" if unseen_only else ""}
-                ORDER BY al.event_at DESC, al.id DESC LIMIT ?""", (limit,)))
+        rows = alerts.derive(conn, db.visitor_settings(conn, v))
+        seen = {r["alert_key"] for r in conn.execute("SELECT alert_key FROM visitor_seen WHERE visitor=?", (v,))}
+        summaries = {r["id"]: r["summary"] for r in conn.execute("SELECT id, summary FROM announcements WHERE summary IS NOT NULL")}
+        names = {r["symbol"]: r["name"] for r in conn.execute("SELECT symbol, name FROM stocks")}
     for r in rows:
-        r["detail"] = json.loads(r["detail"] or "{}")
-        r["seen"] = bool(r["seen"])
-    return {"count": len(rows), "alerts": rows}
+        r["seen"] = r["key"] in seen
+        r["name"] = names.get(r["symbol"])
+        r["summary"] = summaries.get(r["ref_id"]) if r["kind"] == "announcement" else None
+    if unseen_only:
+        rows = [r for r in rows if not r["seen"]]
+    return {"count": len(rows), "alerts": rows[:limit]}
 
 
-@app.post("/api/alerts/{alert_id}/seen")
-def mark_seen(alert_id: int):
+@app.post("/api/alerts/seen-all")
+def mark_all_seen(x_visitor: Optional[str] = Header(None)):
+    v = _visitor(x_visitor)
     with db.session() as conn:
-        conn.execute("UPDATE alerts SET seen=1 WHERE id=?", (alert_id,))
+        for r in alerts.derive(conn, db.visitor_settings(conn, v)):
+            conn.execute("INSERT OR IGNORE INTO visitor_seen(visitor, alert_key) VALUES (?,?)", (v, r["key"]))
+    return {"ok": True}
+
+
+@app.post("/api/alerts/{alert_key:path}/seen")
+def mark_seen(alert_key: str, x_visitor: Optional[str] = Header(None)):
+    with db.session() as conn:
+        conn.execute("INSERT OR IGNORE INTO visitor_seen(visitor, alert_key) VALUES (?,?)", (_visitor(x_visitor), alert_key[:200]))
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- web push ---------------------------------
+
+class PushSub(BaseModel):
+    endpoint: str
+    keys: dict
+
+
+@app.get("/api/push/key")
+def push_key():
+    key = push.public_key()
+    return {"enabled": bool(key), "publicKey": key}
+
+
+@app.post("/api/push/subscribe")
+def push_subscribe(sub: PushSub, request: Request, x_visitor: Optional[str] = Header(None)):
+    limits.check(request, "pushsub", 10, 3600, "notification sign-ups")
+    try:
+        with db.session() as conn:
+            push.subscribe(conn, _visitor(x_visitor), sub.model_dump())
+    except ValueError as e:
+        raise HTTPException(422, str(e))
+    return {"ok": True}
+
+
+@app.post("/api/push/unsubscribe")
+def push_unsubscribe(sub: PushSub, x_visitor: Optional[str] = Header(None)):
+    with db.session() as conn:
+        push.unsubscribe(conn, _visitor(x_visitor), sub.endpoint)
     return {"ok": True}
 
 
@@ -264,29 +330,25 @@ class SettingsUpdate(BaseModel):
     digest_window_hours: Optional[int] = Field(None, ge=1, le=720)
 
 
-def _all_settings(conn) -> dict:
-    return {k: db.get_setting(conn, k) for k in config.DEFAULT_SETTINGS}
-
-
 @app.get("/api/settings")
-def get_settings():
+def get_settings(x_visitor: Optional[str] = Header(None)):
     with db.session() as conn:
-        return _all_settings(conn)
+        return db.visitor_settings(conn, _visitor(x_visitor))
 
 
 @app.put("/api/settings")
-def put_settings(body: SettingsUpdate):
-    """Partial update. Alerts nobody has marked seen are re-derived under the new thresholds."""
+def put_settings(body: SettingsUpdate, x_visitor: Optional[str] = Header(None)):
+    """Partial update of THIS visitor's settings; their alert list re-derives under the new thresholds."""
     changes = body.model_dump(exclude_none=True)
     bad = set(changes.get("alert_categories", [])) - set(config.CATEGORIES)
     if bad:
         raise HTTPException(422, f"Unknown categories: {sorted(bad)}")
+    v = _visitor(x_visitor)
     with db.session() as conn:
-        for k, v in changes.items():
-            conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES (?,?)", (k, json.dumps(v)))
-        alerts.reset_unseen(conn)
-        n = alerts.generate(conn)
-        return {"settings": _all_settings(conn), "alerts_after": n}
+        for k, val in changes.items():
+            conn.execute("INSERT OR REPLACE INTO visitor_settings(visitor, key, value) VALUES (?,?,?)", (v, k, json.dumps(val)))
+        st = db.visitor_settings(conn, v)
+        return {"settings": st, "alerts_after": len(alerts.derive(conn, st))}
 
 
 # ---------------------------------------------------------------- built frontend (one URL for the phone) ---

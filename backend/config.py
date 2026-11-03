@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 _env = ROOT / ".env"      # git-ignored; KEY=value lines, real environment variables win
-if _env.exists():
+if _env.exists() and not os.environ.get("FINN_NO_DOTENV"):   # tests set FINN_NO_DOTENV so they can never pick up a real key
     for _ln in _env.read_text().splitlines():
         _k, _, _v = _ln.partition("=")
         if _k.strip() and not _k.strip().startswith("#") and _v.strip():

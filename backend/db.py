@@ -72,6 +72,33 @@ CREATE TABLE IF NOT EXISTS llm_cache (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS visitor_settings (  -- each browser's own thresholds / followed filing types
+    visitor     TEXT NOT NULL,
+    key         TEXT NOT NULL,
+    value       TEXT NOT NULL,                -- JSON
+    PRIMARY KEY (visitor, key)
+);
+
+CREATE TABLE IF NOT EXISTS visitor_seen (      -- alerts each browser has read (key = symbol:kind:ref_id)
+    visitor     TEXT NOT NULL,
+    alert_key   TEXT NOT NULL,
+    PRIMARY KEY (visitor, alert_key)
+);
+
+CREATE TABLE IF NOT EXISTS push_subs (        -- browser push subscriptions (one visitor may have several devices)
+    endpoint    TEXT PRIMARY KEY,
+    visitor     TEXT NOT NULL,
+    p256dh      TEXT NOT NULL,
+    auth        TEXT NOT NULL,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS push_sent (         -- alerts a visitor has already been notified about
+    visitor     TEXT NOT NULL,
+    alert_key   TEXT NOT NULL,
+    PRIMARY KEY (visitor, alert_key)
+);
+
 CREATE TABLE IF NOT EXISTS research (         -- generated pull-side sections, cached per company
     symbol      TEXT NOT NULL,
     section     TEXT NOT NULL,                -- business | financials | trajectory | ...
@@ -131,3 +158,12 @@ def init_db() -> None:
 def get_setting(conn: sqlite3.Connection, key: str):
     row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return json.loads(row["value"]) if row else config.DEFAULT_SETTINGS.get(key)
+
+
+def visitor_settings(conn: sqlite3.Connection, visitor: str) -> dict:
+    """Defaults, overlaid with this visitor's own choices."""
+    out = {k: get_setting(conn, k) for k in config.DEFAULT_SETTINGS}
+    for r in conn.execute("SELECT key, value FROM visitor_settings WHERE visitor=?", (visitor,)):
+        if r["key"] in out:
+            out[r["key"]] = json.loads(r["value"])
+    return out

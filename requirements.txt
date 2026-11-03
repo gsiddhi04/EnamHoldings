@@ -8,3 +8,4 @@ pandas>=2.0
 pypdf>=4.0              # filing + transcript text extraction
 beautifulsoup4>=4.12    # screener.in tables
 anthropic>=0.40         # only used if you choose ANTHROPIC_API_KEY instead of Gemini
+pywebpush>=2.0           # lock-screen notifications (Web Push)

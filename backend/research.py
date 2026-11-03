@@ -17,10 +17,10 @@ import sqlite3
 import unicodedata
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from . import config, db, facts, llm, pdfs, screener
+from . import business, config, db, facts, limits, llm, pdfs, screener
 
 router = APIRouter(prefix="/api")
 TTL = dt.timedelta(days=7)
@@ -104,9 +104,11 @@ def _json_call(conn, system: str, user: str, model: str, max_tokens: int = 3000)
 # ================================================================== 1. computed research ================
 
 @router.get("/research/{symbol}")
-def research(symbol: str, refresh: bool = False):
+def research(symbol: str, request: Request, refresh: bool = False):
     symbol = _symbol(symbol)
     with db.session() as conn:
+        if refresh or _cached(conn, symbol, "facts") is None:   # only a real screener.in fetch counts against the limit
+            limits.check(request, "screener", 30, 3600, "new company look-ups")
         return _facts(conn, symbol, refresh)
 
 
@@ -306,13 +308,32 @@ def build_promises(conn, symbol: str) -> dict:
 
 
 @router.get("/research/{symbol}/promises")
-def promises(symbol: str, refresh: bool = False):
+def promises(symbol: str, request: Request, refresh: bool = False):
     symbol = _symbol(symbol)
     with db.session() as conn:
         out = None if refresh else _cached(conn, symbol, "promises")
         if out is None:
+            limits.llm_budget(request, "promises", 6, 3600, "new promise analyses")
             out = _llm_guard(build_promises, conn, symbol)
             _store(conn, symbol, "promises", out, [c["url"] for c in out["calls"]], llm.resolve(config.STRONG_MODEL))
+        return out
+
+
+# ================================================================== business snapshot ===================
+
+@router.get("/research/{symbol}/business")
+def business_snapshot(symbol: str, request: Request, refresh: bool = False):
+    symbol = _symbol(symbol)
+    with db.session() as conn:
+        out = None if refresh else _cached(conn, symbol, "business")
+        if out is None:
+            limits.llm_budget(request, "business", 6, 3600, "new business snapshots")
+            sc = _screener(conn, symbol)
+            if "annual_reports" not in sc:                    # cached before we scraped the report list
+                sc = _screener(conn, symbol, refresh=True)
+            out = _llm_guard(business.build, conn, symbol, sc)
+            if not out.get("retry"):                          # a failed download is transient: don't cache it for a week
+                _store(conn, symbol, "business", out, [out.get("source", {}).get("url", sc["url"])], llm.resolve(config.CHEAP_MODEL))
         return out
 
 
@@ -353,11 +374,12 @@ def build_bullbear(conn, symbol: str) -> dict:
 
 
 @router.get("/research/{symbol}/bullbear")
-def bullbear(symbol: str, refresh: bool = False):
+def bullbear(symbol: str, request: Request, refresh: bool = False):
     symbol = _symbol(symbol)
     with db.session() as conn:
         out = None if refresh else _cached(conn, symbol, "bullbear")
         if out is None:
+            limits.llm_budget(request, "bullbear", 6, 3600, "new bull & bear analyses")
             out = _llm_guard(build_bullbear, conn, symbol)
             _store(conn, symbol, "bullbear", out, [out["source"]], llm.resolve(config.STRONG_MODEL))
         return out
@@ -460,7 +482,8 @@ def _company_context(conn, symbol: str) -> Optional[tuple]:
 
 
 @router.post("/ask")
-def ask(body: AskBody):
+def ask(body: AskBody, request: Request):
+    limits.llm_budget(request, "ask", 20, 3600, "questions")
     symbol = _symbol(body.symbol) if body.symbol else None
     if not symbol and not body.ann_id:
         raise HTTPException(422, "Provide a symbol and/or an ann_id")

@@ -2,9 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 
-from . import alerts, classify, config, db, enrich, llm
+from . import alerts, classify, config, db, enrich, llm, push
 from .announcements import NSEClient, store_announcements
 from .prices import fetch_prices, store_prices
 
@@ -52,7 +53,16 @@ def refresh(symbols: list, ann_days: int, price_days: int, verbose: bool = True)
         log("Enrichment skipped (no LLM key): results tables, mgmt profiles, summaries stay empty.")
     with db.session() as conn:
         stats["new_alerts"] = alerts.generate(conn)
-    log(f"Alerts: {stats['new_alerts']} new.")
+        conn.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('last_refresh_at', ?)",
+                     (json.dumps(config.now_ist().isoformat(timespec="seconds")),))
+    log(f"Alerts: {stats['new_alerts']} under the default settings right now.")
+    try:
+        with db.session() as conn:
+            stats["notified"] = push.notify_new(conn)
+        if stats["notified"]:
+            log(f"Push: {stats['notified']} notifications sent.")
+    except Exception as e:   # a push problem must never fail the data refresh
+        stats["errors"].append(f"push: {e}")
 
     log(f"Done. {stats['prices']} price rows, {stats['new_announcements']} new announcements, "
         f"{len(stats['errors'])} errors.")

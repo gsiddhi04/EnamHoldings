@@ -307,3 +307,19 @@ table.fin td.d { font-size: 13.5px; width: 22%; }
 .quiet { margin-top: 18px; }
 .quiet > span { display: block; margin-bottom: 4px; }
 .quiet button { display: inline-block; padding: 8px 10px 8px 0; min-height: 38px; color: var(--navy); font-weight: 500; font-size: 13.5px; }
+
+.mixbar { display: flex; height: 16px; border-radius: 2px; overflow: hidden; margin-top: 12px; border: 1px solid var(--rule); }
+.mixbar i { display: block; height: 100%; border-right: 1px solid var(--card); }
+.segs { list-style: none; margin: 8px 0 0; padding: 0; }
+.segs li { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start; padding: 9px 0; border-top: 1px solid var(--rule); }
+.segs li:first-child { border-top: 0; }
+.segs li > i { width: 11px; height: 11px; border-radius: 2px; margin-top: 6px; }
+.segs li:not(:has(> i)) { grid-template-columns: 1fr auto; }
+.segs .sn { font-family: var(--serif); font-size: 17px; font-weight: 600; line-height: 1.2; }
+.segs .sd { font-size: 13.5px; color: var(--ink2); margin-top: 2px; }
+.segs .sp { font-family: var(--serif); font-size: 19px; font-weight: 600; }
+
+.ratingline { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; font-family: var(--serif); font-size: 22px; margin: 2px 0 4px; }
+.ratingline .chip { font-family: var(--sans); font-size: 12.5px; }
+.srclink { font-family: var(--sans); font-size: 12.5px; white-space: nowrap; }
+.foot a, .srclink { display: inline-block; padding: 8px 2px; margin: -8px 0; }

@@ -109,6 +109,13 @@ def parse(html: str) -> dict:
             ratios[name.get_text(" ", strip=True)] = _num(val.get_text())
     out["top_ratios"] = ratios
 
+    out["annual_reports"] = []
+    h = next((h for h in soup.select("section#documents h3") if "Annual reports" in h.get_text()), None)
+    box = h.find_parent("div", class_="documents") if h else None
+    for a in (box.select("ul.list-links a") if box else []):
+        if a.get("href"):
+            out["annual_reports"].append({"label": a.get_text(" ", strip=True), "url": a["href"]})
+
     out["concalls"] = []
     h = next((h for h in soup.select("section#documents h3") if "Concalls" in h.get_text()), None)
     box = h.find_parent("div", class_="documents") if h else None

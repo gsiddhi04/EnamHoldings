@@ -2,6 +2,8 @@
 
   results      priority >= 80: find the P&L page in the PDF, cheap LLM transcribes the table, Python does the maths
   mgmt         management_change >= 40: extract people + brief-profile background from the annexure
+  ratings      credit_rating: read the rating letter, set priority from the direction (downgrade 75, upgrade 55, reaffirm 20)
+  bios         incoming people the filing doesn't profile: public Wikipedia page if there is one (no model)
   summaries    everything else >= 40: one plain-English line (<= 18 words), 20 filings per LLM call
 
 Usage:  python -m backend.enrich [results|mgmt|summaries ...] [--limit N] [--force] [--all-stocks]
@@ -14,7 +16,7 @@ import re
 import sqlite3
 from typing import Dict, List, Optional, Tuple
 
-from . import config, db, llm, pdfs
+from . import config, db, llm, pdfs, profiles
 
 RESULTS_MIN_PRIORITY = 80
 SUMMARY_MIN_PRIORITY = 40
@@ -258,6 +260,76 @@ def enrich_mgmt(conn: sqlite3.Connection, row) -> Tuple[Optional[dict], Optional
     return facts, "; ".join(bits) + (f" (+{len(people) - 2} more)" if len(people) > 2 else "")
 
 
+# ============================================================ (d) credit ratings =========================
+
+RATING_SYSTEM = """You read a credit-rating agency's letter or press release about a listed company.
+Reply with ONLY JSON: {"agency": "", "instrument": "short description of what was rated, or null",
+"action": "assigned|upgraded|downgraded|reaffirmed|withdrawn|outlook_revised|other",
+"rating_from": "previous rating or null", "rating_to": "the rating now", "outlook": "positive|stable|negative|watch|null",
+"amount_cr": number or null}
+Use ONLY the document. If several instruments are rated, describe the most important one (largest amount or the long-term rating)
+and take the action from the headline of the letter. Never guess a rating that is not printed."""
+
+# base priority by what the agency did, since direction decides whether an investor cares
+RATING_PRIORITY = {"downgraded": (75, "Credit rating downgraded"), "upgraded": (55, "Credit rating upgraded"),
+                   "assigned": (45, "New credit rating assigned"), "withdrawn": (40, "Credit rating withdrawn"),
+                   "outlook_revised": (45, "Rating outlook changed"), "reaffirmed": (20, "Credit rating reaffirmed"),
+                   "other": (30, "Credit rating action")}
+_RATING_VERB = {"downgraded": "downgrades", "upgraded": "upgrades", "assigned": "assigns", "reaffirmed": "reaffirms",
+                "withdrawn": "withdraws", "outlook_revised": "revises the outlook on", "other": "rates"}
+
+
+def enrich_rating(conn: sqlite3.Connection, row) -> Tuple[Optional[dict], Optional[str]]:
+    pages = pdfs.get_pages(row["id"], row["attachment"])
+    if not pages:
+        return {"type": "credit_rating", "status": "unavailable",
+                "reason": "attachment is not a readable PDF" if pages is None else "scanned PDF (no text layer)"}, None
+    text = "\n\n".join(pages)[:7000]
+    d = llm.parse_json(llm.complete(conn, RATING_SYSTEM, f"Company: {row['symbol']}\n\n{text}", max_tokens=600))
+    action = d.get("action") if d.get("action") in RATING_PRIORITY else "other"
+    pri, why = RATING_PRIORITY[action]
+    outlook = d.get("outlook")
+    if outlook == "negative" and action in ("reaffirmed", "assigned", "other"):
+        pri, why = 55, "Credit rating outlook negative"       # a reaffirmation with a negative outlook is still a warning
+    elif outlook == "positive" and action == "reaffirmed":
+        pri, why = 30, "Credit rating reaffirmed, outlook positive"
+    facts = {"type": "credit_rating", "status": "ok", "model": llm.resolve(None), "agency": d.get("agency"),
+             "instrument": d.get("instrument"), "action": action, "rating_from": d.get("rating_from"),
+             "rating_to": d.get("rating_to"), "outlook": outlook, "amount_cr": d.get("amount_cr"),
+             "priority": pri, "why": why}
+    bits = [f"{d.get('agency') or 'Rating agency'} {_RATING_VERB[action]} {row['symbol']}"]
+    if d.get("rating_to"):
+        bits.append(f"to {d['rating_to']}" + (f" from {d['rating_from']}" if d.get("rating_from") and action in ("upgraded", "downgraded") else ""))
+    if outlook and outlook != "null":
+        bits.append(f"(outlook {outlook})")
+    return facts, " ".join(bits)
+
+
+# ============================================================ (e) public bios for incoming people ========
+
+IN_TYPES = ("appointment", "re-appointment", "change_in_designation")
+
+
+def enrich_bios(conn: sqlite3.Connection, stats: dict, force: bool = False) -> None:
+    """For incoming people whose filing gave no profile, look for a public Wikipedia page. No model involved."""
+    rows = conn.execute("""SELECT a.id, a.symbol, a.facts, COALESCE(s.name, a.symbol) AS name FROM announcements a
+                           LEFT JOIN stocks s ON s.symbol=a.symbol WHERE a.facts LIKE '%"management_change"%'""").fetchall()
+    for r in rows:
+        facts, changed = json.loads(r["facts"]), False
+        for p in facts.get("people", []):
+            if p.get("background") or p.get("change_type") not in IN_TYPES or (p.get("web_checked") and not force):
+                continue
+            found = profiles.wiki_bio(p["name"], r["name"])
+            p["web_checked"] = True
+            if found:
+                p["web_bio"] = found
+                stats["bios"] += 1
+            changed = True
+        if changed:
+            conn.execute("UPDATE announcements SET facts=? WHERE id=?", (json.dumps(facts), r["id"]))
+            conn.commit()
+
+
 # ============================================================ (c) one-line summaries =====================
 
 SUMMARY_SYSTEM = f"""You write one-line plain-English summaries of stock-exchange filings for a busy investor.
@@ -314,10 +386,10 @@ def enrich_summaries(conn: sqlite3.Connection, rows: list, stats: dict) -> None:
 
 # ============================================================ driver ======================================
 
-def run(kinds=("results", "mgmt", "summaries"), limit: Optional[int] = None, force: bool = False,
+def run(kinds=("results", "mgmt", "ratings", "bios", "summaries"), limit: Optional[int] = None, force: bool = False,
         all_stocks: bool = False, verbose: bool = False) -> dict:
     log = print if verbose else (lambda *a, **k: None)
-    stats = {"results": 0, "mgmt": 0, "summaries": 0, "needs_review": 0, "unavailable": 0, "llm_calls": 0,
+    stats = {"results": 0, "mgmt": 0, "ratings": 0, "bios": 0, "summaries": 0, "needs_review": 0, "unavailable": 0, "llm_calls": 0,
              "skipped": None, "errors": []}
     scope = "" if all_stocks else "AND s.in_portfolio=1"
     todo = "" if force else "AND a.facts IS NULL"
@@ -334,6 +406,9 @@ def run(kinds=("results", "mgmt", "summaries"), limit: Optional[int] = None, for
         if "mgmt" in kinds:
             jobs += [("mgmt", r, enrich_mgmt) for r in
                      fetch(f"a.category='management_change' AND a.priority>={SUMMARY_MIN_PRIORITY} AND a.attachment IS NOT NULL", todo)]
+        if "ratings" in kinds:
+            jobs += [("ratings", r, enrich_rating) for r in
+                     fetch("a.category='credit_rating' AND a.attachment IS NOT NULL", todo)]
         for kind, row, fn in jobs:
             try:
                 facts, summary = fn(conn, row)
@@ -351,8 +426,17 @@ def run(kinds=("results", "mgmt", "summaries"), limit: Optional[int] = None, for
             stats["needs_review"] += facts.get("status") == "needs_review"
             conn.execute("UPDATE announcements SET facts=?, summary=COALESCE(?, summary) WHERE id=?",
                          (json.dumps(facts), summary, row["id"]))
+            if kind == "ratings" and facts.get("priority") is not None:   # direction of the rating decides where it lands in the brief
+                conn.execute("UPDATE announcements SET priority=?, why=?, classified_by=? WHERE id=?",
+                             (facts["priority"], facts["why"], "pdf:rating", row["id"]))
             conn.commit()
             log(f"  {kind:<7} {row['symbol']:<10} {facts.get('status'):<12} {summary or facts.get('reason', '')}")
+
+        if "bios" in kinds:
+            try:
+                enrich_bios(conn, stats, force)
+            except Exception as e:      # a Wikipedia hiccup must never block the rest of the pipeline
+                stats["errors"].append(f"bios: {e}")
 
         if "summaries" in kinds:
             rows = fetch(f"a.priority>={SUMMARY_MIN_PRIORITY} AND a.category!='management_change' "
@@ -367,16 +451,16 @@ def run(kinds=("results", "mgmt", "summaries"), limit: Optional[int] = None, for
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("kinds", nargs="*", help="results | mgmt | summaries (default: all)")
+    p.add_argument("kinds", nargs="*", help="results | mgmt | ratings | bios | summaries (default: all)")
     p.add_argument("--limit", type=int)
     p.add_argument("--force", action="store_true", help="redo filings already enriched")
     p.add_argument("--all-stocks", action="store_true", help="include non-portfolio (ad-hoc) symbols")
     a = p.parse_args()
     db.init_db()
-    bad = [k for k in a.kinds if k not in ("results", "mgmt", "summaries")]
+    bad = [k for k in a.kinds if k not in ("results", "mgmt", "ratings", "bios", "summaries")]
     if bad:
         p.error(f"unknown stage: {bad}")
-    print(run(tuple(a.kinds or ("results", "mgmt", "summaries")), a.limit, a.force, a.all_stocks, verbose=True))
+    print(run(tuple(a.kinds or ("results", "mgmt", "ratings", "bios", "summaries")), a.limit, a.force, a.all_stocks, verbose=True))
 
 
 if __name__ == "__main__":

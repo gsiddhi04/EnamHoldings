@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import { api } from "./api.js";
 import AskFinn from "./AskFinn.jsx";
-import { People, ResultsTable, headlineFor, kindOf } from "./cards.jsx";
+import { People, RatingLine, ResultsTable, headlineFor, kindOf } from "./cards.jsx";
 import { CAT, stamp } from "./format.js";
 
 const SUGGEST = {
   results: ["What drove the change in profit?", "How do margins compare with last year?", "Is anything unusual in these numbers?"],
   mgmt: ["Who is the new person and where did they work before?", "Why is this change happening?", "When does it take effect?"],
+  rating: ["What does this rating change mean for the company's borrowing?", "Which facilities does it cover?", "What did the agency say drove it?"],
   generic: ["What does this mean for shareholders?", "What are the key amounts or terms?", "What's missing from this filing?"],
 };
 
@@ -51,6 +52,7 @@ export default function Sheet({ item, now, onClose }) {
                 </p>
               )}
               {k === "mgmt" && <People people={it.facts.people} bios />}
+              {k === "rating" && <><RatingLine f={it.facts} full />{it.summary && <p className="deck" style={{ marginTop: 8 }}>{it.summary}</p>}</>}
               {k === "generic" && (
                 <>
                   {it.summary && <p className="deck" style={{ fontSize: 17 }}>{it.summary}</p>}

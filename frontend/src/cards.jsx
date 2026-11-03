@@ -13,6 +13,7 @@ export function kindOf(it) {
   const f = it.facts;
   if (f?.type === "results" && f.status === "ok") return "results";
   if (f?.type === "management_change" && f.people?.length) return "mgmt";
+  if (f?.type === "credit_rating" && f.status === "ok") return "rating";
   return "generic";
 }
 
@@ -34,6 +35,10 @@ export function headlineFor(it) {
     if (pDn && rUp) return `${head} even as revenue climbs ${mag(rev)}%`;
     if (pUp && rDn) return `${head} despite ${mag(rev)}% lower revenue`;
     return rUp ? `${head}; revenue up ${mag(rev)}%` : rDn ? `${head}; revenue down ${mag(rev)}%` : head;
+  }
+  if (k === "rating") {
+    const v = { upgraded: "upgrades", downgraded: "downgrades", reaffirmed: "reaffirms", assigned: "assigns a rating to", withdrawn: "withdraws its rating on", outlook_revised: "changes its outlook on", other: "rates" }[f.action] || "rates";
+    return `${f.agency || "Agency"} ${v} ${nm}${f.rating_to && f.action !== "withdrawn" ? (f.action === "reaffirmed" ? " at " : " to ") + f.rating_to : ""}`;
   }
   if (k === "mgmt") {
     const p = f.people.find((x) => SENIOR.test(x.role || "")) || f.people[0];
@@ -71,6 +76,18 @@ export function ResultsTable({ facts, compact }) {
   );
 }
 
+export function RatingLine({ f, full }) {
+  const tone = f.action === "downgraded" ? "down" : f.action === "upgraded" ? "up" : "flat";
+  return (
+    <div className="ratingline">
+      {f.rating_from && f.rating_to && <span className="num"><span className="muted">{f.rating_from}</span> → <b className={tone}>{f.rating_to}</b></span>}
+      {!f.rating_from && f.rating_to && <b className="num">{f.rating_to}</b>}
+      {f.outlook && f.outlook !== "null" && <span className="chip">outlook {f.outlook}</span>}
+      {full && f.instrument && <div className="foot" style={{ flexBasis: "100%" }}>{f.instrument}{f.amount_cr ? ` · ₹${inr(f.amount_cr)} cr` : ""}</div>}
+    </div>
+  );
+}
+
 export function People({ people, bios, limit }) {
   const list = limit ? people.slice(0, limit) : people;
   return (
@@ -84,6 +101,12 @@ export function People({ people, bios, limit }) {
             <span className="role">{p.role}</span>
             {p.effective_date && <span className="when2">{side === "out" ? "Effective" : "From"} {shortDate(p.effective_date)}</span>}
             {bios && p.background && <span className="bio">{p.background}</span>}
+            {bios && !p.background && p.web_bio && (
+              <span className="bio">{p.web_bio.text} <a className="srclink" href={p.web_bio.url} target="_blank" rel="noreferrer">{p.web_bio.source} ↗</a></span>
+            )}
+            {bios && !p.background && !p.web_bio && (p.change_type === "appointment" || p.change_type === "re-appointment") && (
+              <span className="when2">No profile in the filing and no public page found.</span>
+            )}
             {bios && p.reason && <span className="when2">Reason given: {p.reason}</span>}
           </li>
         );
@@ -95,13 +118,14 @@ export function People({ people, bios, limit }) {
 export function Card({ item, now, onOpen }) {
   const k = kindOf(item), f = item.facts;
   const hl = headlineFor(item);
-  const kick = k === "results" ? "Results" : k === "mgmt" ? "Leadership" : item.why || CAT[item.category];
+  const kick = k === "results" ? "Results" : k === "mgmt" ? "Leadership" : k === "rating" ? "Credit rating" : item.why || CAT[item.category];
   const deck = k === "generic" && !item.summary && item.text && item.text !== hl ? item.text.slice(0, 150) : null;
   return (
     <button className="card" onClick={() => onOpen(item)}>
       <div className="kicker"><span><b>{item.name}</b> · {kick}</span><span className="when">{when(item.ann_dt, now)}</span></div>
       <h3>{hl}</h3>
       {k === "results" && <ResultsTable facts={f} compact />}
+      {k === "rating" && <RatingLine f={f} />}
       {k === "mgmt" && <>
         <People people={f.people} limit={3} />
         {f.people.length > 3 && <div className="related">+{f.people.length - 3} more changes in this filing</div>}

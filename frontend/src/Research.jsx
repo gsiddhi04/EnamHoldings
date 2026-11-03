@@ -36,13 +36,14 @@ function Search({ go }) {
   );
 }
 
-const TABS = [["promises", "Promised vs delivered"], ["numbers", "Numbers"], ["cash", "Cash"], ["case", "Bull & bear"], ["ask", "Ask FINN"]];
+const TABS = [["promises", "Promised vs delivered"], ["business", "Business"], ["numbers", "Numbers"], ["cash", "Cash"], ["case", "Bull & bear"], ["ask", "Ask FINN"]];
 
 function Report({ symbol, go }) {
   const facts = useAsync(() => api.research(symbol), [symbol]);
   const ok = !!facts.data;
   const promises = useAsync(() => (ok ? api.promises(symbol) : Promise.resolve(null)), [symbol, ok]);
   const bb = useAsync(() => (ok ? api.bullbear(symbol) : Promise.resolve(null)), [symbol, ok]);
+  const biz = useAsync(() => (ok ? api.business(symbol) : Promise.resolve(null)), [symbol, ok]);
   const [active, setActive] = useState("promises");
   const refs = useRef({});
 
@@ -86,6 +87,7 @@ function Report({ symbol, go }) {
           </nav>
 
           {sec("promises", "Promised vs delivered", <Promises state={promises} concalls={f.concall_count} />)}
+          {sec("business", "The business", <Business state={biz} />)}
           {sec("numbers", "The numbers", <Numbers f={f} />)}
           {sec("cash", "Does profit turn into cash?", <Cash f={f} />)}
           {sec("case", "Bull & bear", <Case state={bb} />)}
@@ -266,4 +268,44 @@ function Case({ state }) {
   );
   return <>{side("bull", "The case for", "bull")}{side("bear", "The case against", "bear")}
     {!d.complete && <p className="foot">The data supported fewer than three points on one side, so we show fewer rather than stretch.</p>}</>;
+}
+
+// ------------------------------------------------------------------ business
+const MIX = ["#1E2B4F", "#4A5B8C", "#8A97BD", "#B58A55", "#D3B88C", "#9C9288", "#6E6259", "#C9C2BC"];
+
+function Business({ state }) {
+  const text = useTicker(["Opening the latest annual report…", "Finding the business description…", "Finding the segment note…"], state.loading, 6000);
+  if (state.error) return <div className="err">{state.error}<button onClick={state.reload}>Try again</button></div>;
+  if (state.loading || !state.data) return <div className="reading"><span className="pulse" />{text}</div>;
+  const b = state.data;
+  if (!b.available) return <p className="note">{b.reason}</p>;
+  const segs = b.segments || [];
+  return (
+    <>
+      <p className="deck" style={{ fontSize: 18, color: "var(--ink)", marginTop: 0 }}>{b.what_it_does}</p>
+      {b.how_it_makes_money && <p className="deck">{b.how_it_makes_money}</p>}
+      {b.mix_ok && (
+        <>
+          <div className="mixbar" role="img" aria-label="Revenue mix by segment">
+            {segs.filter((s) => s.share_pct).map((s, i) => <i key={s.name} style={{ width: s.share_pct + "%", background: MIX[i % MIX.length] }} />)}
+          </div>
+          <div className="foot" style={{ marginTop: 6 }}>Share of segment revenue{b.segment_basis ? `, ${b.segment_basis}` : ""}, latest financial year</div>
+        </>
+      )}
+      {segs.length > 0 && (
+        <ul className="segs">
+          {segs.map((s, i) => (
+            <li key={s.name}>
+              {b.mix_ok && s.share_pct != null && <i style={{ background: MIX[i % MIX.length] }} />}
+              <div><div className="sn">{s.name}</div>{s.description && <div className="sd">{s.description}</div>}</div>
+              {b.mix_ok && s.share_pct != null && <span className="sp num">{s.share_pct.toFixed(1)}%</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {!b.mix_ok && segs.length > 0 && <p className="foot">The report's segment figures didn't reconcile with reported revenue, so no mix is shown.</p>}
+      {b.mix_note && <p className="note">{b.mix_note}</p>}
+      <p className="foot">From the <a href={b.source.url} target="_blank" rel="noreferrer">{b.source.report} ↗</a> (pages {b.source.pages.join(", ")}). Segment shares are computed from the printed segment revenue.</p>
+    </>
+  );
 }

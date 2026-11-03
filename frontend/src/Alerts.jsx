@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "./api.js";
 import { CAT, dir, inr, pct, stamp } from "./format.js";
 import { useAsync } from "./hooks.js";
+import { disablePush, enablePush, pushStatus } from "./push.js";
 
 const FOLLOW = ["results", "M&A", "management_change", "litigation", "credit_rating", "fund_raise", "dividend",
   "bonus_split", "capex", "insider_trading", "pledging", "earnings_call"];
@@ -13,6 +14,38 @@ function Stepper({ value, set, min, max, step, fmt, label }) {
       <button onClick={() => bump(-step)} disabled={value <= min} aria-label={`Decrease ${label}`}>−</button>
       <output className="num">{fmt(value)}</output>
       <button onClick={() => bump(step)} disabled={value >= max} aria-label={`Increase ${label}`}>+</button>
+    </div>
+  );
+}
+
+function PushRow() {
+  const st = useAsync(pushStatus, []);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const s = st.data?.state;
+  if (!s || s === "unavailable") return null;
+  const toggle = async () => {
+    setBusy(true); setErr("");
+    try { s === "on" ? await disablePush() : await enablePush(st.data.key); st.reload(); }
+    catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  };
+  const note = {
+    "needs-install": "On iPhone, add FINN to your Home Screen first (Share, then Add to Home Screen), then open it from there to turn this on.",
+    unsupported: "This browser can't show notifications.",
+    denied: "Notifications are blocked for this site in your browser settings.",
+    on: "On. We'll notify you when a refresh finds something new that crosses your limits.",
+    off: "Get a notification on this device when something new crosses your limits.",
+  }[s];
+  return (
+    <div className="panel" style={{ marginTop: 12 }}>
+      <div className="rowset">
+        <div><div className="lbl">Notify me on this device</div><div className="sub">{note}</div></div>
+        {(s === "on" || s === "off") && (
+          <button className={`tog ${s === "on" ? "on" : ""}`} onClick={toggle} disabled={busy} aria-pressed={s === "on"}>{s === "on" ? "On" : "Turn on"}</button>
+        )}
+      </div>
+      {err && <div className="err" style={{ marginBottom: 10 }}>{err}</div>}
     </div>
   );
 }
@@ -50,10 +83,10 @@ export default function Alerts({ onOpen, goStock, onBadge }) {
   const toggle = (c) => change({ alert_categories: s.alert_categories.includes(c) ? s.alert_categories.filter((x) => x !== c) : [...s.alert_categories, c] });
 
   async function read(a) {
-    if (!a.seen) { api.seen(a.id).then(list.reload); }
+    if (!a.seen) { api.seen(a.key).then(list.reload); }
   }
   async function readAll() {
-    await Promise.all(list.data.alerts.filter((a) => !a.seen).map((a) => api.seen(a.id)));
+    await api.seenAll();
     list.reload();
   }
 
@@ -93,12 +126,14 @@ export default function Alerts({ onOpen, goStock, onBadge }) {
         </>
       )}
 
+      <PushRow />
+
       <div className="sec"><h2>Triggered</h2>
         {unseen > 0 && <button className="linkbtn" style={{ marginLeft: "auto", order: 4 }} onClick={readAll}>Mark all read</button>}
       </div>
       {list.error && <div className="err">{list.error}<button onClick={list.reload}>Try again</button></div>}
       {list.data && alerts.length === 0 && <div className="empty">Nothing has crossed your limits.<br />Loosen them above to see more.</div>}
-      {alerts.map((a) => <AlertRow key={a.id} a={a} onOpen={onOpen} goStock={goStock} read={read} />)}
+      {alerts.map((a) => <AlertRow key={a.key} a={a} onOpen={onOpen} goStock={goStock} read={read} />)}
     </>
   );
 }
